@@ -1,77 +1,43 @@
 import streamlit as st
-from scrapy import Spider, signals
-from scrapy.crawler import CrawlerRunner
-from scrapy.utils.project import get_project_settings
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin, urlparse
-from twisted.internet import reactor
-from threading import Thread
-import crochet
-crochet.setup()
-
-class DocSpider(Spider):
-    name = 'doc_spider'
-    text_content = []
-    
-    def __init__(self, url=None):
-        self.start_urls = [url]
-        self.allowed_domains = [urlparse(url).netloc]
-        self.visited_urls = set()
-
-    def parse(self, response):
-        if response.url in self.visited_urls:
-            return
-        
-        self.visited_urls.add(response.url)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        for script in soup(["script", "style"]):
-            script.decompose()
-            
-        text = ' '.join(chunk.strip() for chunk in soup.get_text().splitlines() if chunk.strip())
-        
-        if text:
-            self.text_content.append({
-                'url': response.url,
-                'content': text
-            })
-
-        for href in response.css('a::attr(href)').getall():
-            url = urljoin(response.url, href)
-            if urlparse(url).netloc in self.allowed_domains:
-                yield response.follow(url, self.parse)
-
-@crochet.run_in_reactor
-def scrape_url(url):
-    runner = CrawlerRunner(get_project_settings())
-    d = runner.crawl(DocSpider, url=url)
-    return d
 
 def main():
-    st.title("Documentation Scraper")
-    url = st.text_input("Enter documentation URL:")
-    
-    if st.button("Scrape"):
-        if url:
-            try:
-                with st.spinner('Scraping documentation...'):
-                    deferred = scrape_url(url)
-                    deferred.wait(timeout=180)
-                    spider = DocSpider(url)
-                    
-                    if spider.text_content:
-                        st.success(f"Scraped {len(spider.text_content)} pages")
-                        for idx, page in enumerate(spider.text_content, 1):
-                            with st.expander(f"Page {idx}: {page['url']}"):
-                                st.text_area("Content", page['content'], height=200)
-                    else:
-                        st.warning("No content found")
-            except Exception as e:
-                st.error(f"Error: {str(e)}")
-        else:
-            st.warning("Please enter a URL")
+    st.set_page_config(page_title="AskDocs - Chat with Documentation", page_icon="📚", layout="centered")
+
+    st.title("AskDocs 📚")
+    st.subheader("Your AI-powered documentation assistant")
+
+    st.write("""
+    Tired of spending hours reading through documentation? 
+    AskDocs is here to help! Our AI-powered tool allows you to chat 
+    with any documentation, getting quick and accurate answers to your questions.
+    """)
+
+    st.markdown("### How it works")
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.image("https://placeholder.svg?height=100&width=100", caption="1. Paste Doc Link")
+        st.write("Simply paste the link to your documentation.")
+
+    with col2:
+        st.image("https://placeholder.svg?height=100&width=100", caption="2. Ask Questions")
+        st.write("Ask questions in natural language.")
+
+    with col3:
+        st.image("https://placeholder.svg?height=100&width=100", caption="3. Get Answers")
+        st.write("Receive accurate answers from our AI.")
+
+    st.markdown("### Benefits")
+    st.write("✅ Save time on reading extensive documentation")
+    st.write("✅ Get precise answers to your questions")
+    st.write("✅ Improve productivity and understanding")
+
+    if st.button("Get Started", key="get_started"):
+        st.success("Great! Redirecting you to the dashboard...")
+        st.switch_page("pages/1_Dashboard.py")
+
+    st.markdown("---")
+    st.write("© 2023 AskDocs. All rights reserved.")
 
 if __name__ == "__main__":
     main()
-
-
