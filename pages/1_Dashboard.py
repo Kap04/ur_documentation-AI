@@ -5,7 +5,20 @@ import requests
 from urllib.parse import urljoin, urlparse
 import time
 import queue
+from snowflake.snowpark import Session
 import threading
+from mistralai.client import MistralClient
+
+from mistralai.client import MistralClient
+
+from mistralai import Mistral
+
+from mistralai.async_client import MistralAsyncClient
+import asyncio
+
+from snowflake.core import Root
+
+import os
 
 # Configure Streamlit page
 st.set_page_config(
@@ -23,6 +36,82 @@ if 'scrape_queue' not in st.session_state:
     st.session_state['scrape_queue'] = queue.Queue()
 if 'scraped_pages' not in st.session_state:
     st.session_state['scraped_pages'] = []
+
+
+class DocSearchService:
+    def __init__(self, connection_params):
+        self.session = Session.builder.configs(connection_params).create()
+
+    def search_documentation(self, query, documentation_id, limit=5):
+        try:
+            cortex_search_service = (
+                Root(self.session)
+                .databases["ASK_DOC"]
+                .schemas["PUBLIC"]
+                .cortex_search_services["doc_search_service"]
+            )
+            
+            # Use PAGE_ID attribute since that's what we defined in the search service
+            search_results = cortex_search_service.search(
+                query=query,
+                columns=["CONTENT", "PAGE_ID", "DOCUMENTATION_ID"],
+                limit=limit
+            )
+            
+            # Filter results after search since DOCUMENTATION_ID isn't an attribute
+            filtered_results = [
+                result for result in search_results.results 
+                if result.get("DOCUMENTATION_ID") == documentation_id
+            ]
+            
+            return filtered_results[:limit]
+        except Exception as e:
+            st.error(f"Search error: {str(e)}")
+            return []
+
+class LLMService:
+    def __init__(self, api_key):
+        self.client = Mistral(api_key=api_key)
+
+    def get_response(self, prompt, context):
+        try:
+            messages = [
+                {
+                    "role": "system",
+                    "content": "You are a helpful documentation assistant. Use the provided context to answer questions. If the answer isn't in the context, say so."
+                },
+                {
+                    "role": "user",
+                    "content": f"Context: {context}\n\nQuestion: {prompt}"
+                }
+            ]
+
+            response = self.client.chat.complete(
+                model="mistral-medium",
+                messages=messages
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            st.error(f"LLM error: {str(e)}")
+            return "Sorry, I encountered an error processing your request."
+            
+def initialize_services():
+    if 'doc_search' not in st.session_state:
+        connection_params = {
+            "user": 'KAP',
+            "password": '9714044400K@p',
+            "account": 'YEB46881',
+            "warehouse": 'COMPUTE_WH',
+            "database": 'ASK_DOC',
+            "schema": 'ask_doc_schema'
+        }
+        st.session_state.doc_search = DocSearchService(connection_params)
+    
+    if 'llm_service' not in st.session_state:
+        # Hardcoded API key instead of using secrets
+        mistral_api_key = "lrverkbFAwCgjROS1McgRmJmuJIiJMpA"  # Replace with your actual API key
+        st.session_state.llm_service = LLMService(mistral_api_key)
+
 
 def get_snowflake_connection():
     """Create and return a Snowflake connection"""
@@ -67,49 +156,39 @@ def safe_scrape_page(url, domain):
 
 def authenticate_user(username, password):
     try:
-        conn = snowflake.connector.connect(
-            user='KAP',  # Replace with your Snowflake username
-            password='9714044400K@p',  # Replace with your Snowflake password
-            account='YEB46881',  # Replace with your Snowflake account name
-            warehouse='COMPUTE_WH',  # Replace with your Snowflake warehouse
-            database='ASK_DOC',  # Replace with your database
-            schema='ask_doc_schema'  # Replace with your schema
-        )
-
+        conn = get_snowflake_connection()
         cursor = conn.cursor()
-        query = f"SELECT COUNT(*) FROM users WHERE username = '{username}' AND password = '{password}'"
-        cursor.execute(query)
+        # Use parameterized query to prevent SQL injection
+        cursor.execute(
+            "SELECT COUNT(*) FROM users WHERE username = %s AND password = %s",
+            (username, password)
+        )
         result = cursor.fetchone()
-
-        if result[0] == 1:
-            st.success(f"Welcome back, {username}!")
-            return True
-        else:
-            st.error("Invalid username or password.")
-            return False
+        return result[0] == 1
     except Exception as e:
-        st.error(f"Error in Snowflake authentication: {e}")
+        st.error(f"Authentication error: {str(e)}")
         return False
+    finally:
+        if conn:
+            conn.close()
 
-# User Sign-Up Function
 def signup_user(username, password):
     try:
-        conn = snowflake.connector.connect(
-            user='KAP',  # Replace with your Snowflake username
-            password='9714044400K@p',  # Replace with your Snowflake password
-            account='YEB46881',  # Replace with your Snowflake account name
-            warehouse='COMPUTE_WH',  # Replace with your Snowflake warehouse
-            database='ASK_DOC',  # Replace with your database
-            schema='ask_doc_schema'  # Replace with your schema
-        )
-
+        conn = get_snowflake_connection()
         cursor = conn.cursor()
-        query = f"INSERT INTO users (username, password) VALUES ('{username}', '{password}')"
-        cursor.execute(query)
+        # Use parameterized query to prevent SQL injection
+        cursor.execute(
+            "INSERT INTO users (username, password) VALUES (%s, %s)",
+            (username, password)
+        )
         conn.commit()
-        st.success("Sign-up successful! You can now log in.")
+        return True
     except Exception as e:
-        st.error(f"Error in Sign-Up: {e}")
+        st.error(f"Signup error: {str(e)}")
+        return False
+    finally:
+        if conn:
+            conn.close()
 
 
 def scrape_documentation(base_url):
@@ -159,22 +238,27 @@ def store_documentation_data(username, doc_name, base_url, pages_data):
         cur.execute("SELECT USER_ID FROM USERS WHERE USERNAME = %s", (username,))
         user_id = cur.fetchone()[0]
         
-        # Insert documentation
+        # Insert documentation and get ID using RETURNING clause
         cur.execute("""
             INSERT INTO DOCUMENTATIONS (USER_ID, DOCUMENTATION_NAME, DOCUMENTATION_LINK)
             VALUES (%s, %s, %s)
             //RETURNING DOCUMENTATION_ID
         """, (user_id, doc_name, base_url))
+        
         doc_id = cur.fetchone()[0]
         
-        # Store pages and content
+        # Store current documentation ID in session state
+        st.session_state.current_documentation_id = doc_id
+        
+        # Store pages and content using batch insert for better performance
         for page in pages_data:
-            # Insert page
+            # Insert page and get its ID
             cur.execute("""
                 INSERT INTO PAGES (DOCUMENTATION_ID, PAGE_LINK)
                 VALUES (%s, %s)
                 //RETURNING PAGE_ID
             """, (doc_id, page['url']))
+            
             page_id = cur.fetchone()[0]
             
             # Insert content
@@ -192,11 +276,14 @@ def store_documentation_data(username, doc_name, base_url, pages_data):
         if conn:
             conn.close()
 
+            
 def dashboard():
     """Main dashboard UI"""
     st.title("Documentation Scraper")
+
+    initialize_services()
     
-    with st.form("scrape_form"):
+    with st.form("scrape_form"):    
         doc_name = st.text_input("Documentation Name")
         doc_url = st.text_input("Documentation URL")
         submitted = st.form_submit_button("Scrape Documentation")
@@ -220,40 +307,79 @@ def dashboard():
                             st.error("Failed to store documentation.")
                 else:
                     st.warning("No content found to scrape.")
+     # Chat interface
+    if 'messages' not in st.session_state:
+        st.session_state.messages = []
+
+    # Display chat history
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    # Chat input
+    if prompt := st.chat_input("Ask about the documentation"):
+        # Add user message
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        current_doc_id = st.session_state.get('current_documentation_id')
+        if not current_doc_id:
+            response = "Please scrape a documentation first before asking questions."
+        else:
+            # Get relevant context from Cortex Search
+            with st.spinner("Searching documentation..."):
+                search_results = st.session_state.doc_search.search_documentation(
+                    prompt, 
+                    current_doc_id
+                )
+                context = "\n".join([result["CONTENT"] for result in search_results])
+
+            # Get LLM response
+            with st.spinner("Generating response..."):
+                response = st.session_state.llm_service.get_response(prompt, context)
+
+        # Add assistant message
+        st.session_state.messages.append({"role": "assistant", "content": response})
+        with st.chat_message("assistant"):
+            st.markdown(response)
+
 
 def main():
-    """Main application entry point"""
-    if not st.session_state['logged_in']:
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("Login")
-            with st.form("login_form"):
-                username = st.text_input("Username")
-                password = st.text_input("Password", type="password")
-                login_submitted = st.form_submit_button("Login")
-                
-                if login_submitted:
-                    if authenticate_user(username, password):
-                        st.session_state['logged_in'] = True
-                        st.session_state['username'] = username
-                        #st.experimental_rerun()
-        
-        with col2:
-            st.subheader("Sign Up")
-            with st.form("signup_form"):
-                new_username = st.text_input("Choose Username")
-                new_password = st.text_input("Choose Password", type="password")
-                confirm_password = st.text_input("Confirm Password", type="password")
-                signup_submitted = st.form_submit_button("Sign Up")
-                
-                if signup_submitted:
-                    if new_password != confirm_password:
-                        st.error("Passwords don't match")
-                    else:
-                        signup_user(new_username, new_password)
-    else:
-        dashboard()
+    st.sidebar.title("Menu")
+    menu = st.sidebar.radio("Navigation", ["Login", "Sign Up", "Dashboard"])
+
+    if menu == "Login":
+        st.title("Login")
+        with st.form("login_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            login_button = st.form_submit_button("Log In")
+
+            if login_button:
+                if authenticate_user(username, password):
+                    st.session_state['logged_in'] = True
+                    st.session_state['username'] = username
+                    st.success("Logged in successfully!")
+                else:
+                    st.error("Invalid credentials. Please try again.")
+    
+    elif menu == "Sign Up":
+        st.title("Sign Up")
+        with st.form("signup_form"):
+            username = st.text_input("Choose a Username")
+            password = st.text_input("Choose a Password", type="password")
+            signup_button = st.form_submit_button("Sign Up")
+
+            if signup_button:
+                signup_user(username, password)
+    
+    elif menu == "Dashboard":
+        if st.session_state['logged_in']:
+            dashboard()
+        else:
+            st.warning("Please log in to access the dashboard.")
+
 
 if __name__ == "__main__":
     main()
