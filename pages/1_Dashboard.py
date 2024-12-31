@@ -1,3 +1,7 @@
+
+
+
+
 import streamlit as st # type: ignore
 import snowflake.connector
 from snowflake.snowpark import Session
@@ -181,32 +185,50 @@ def signup_page():
 
 class SearchService:
     def __init__(self, session):
+        self.session = session
         self.root = Root(session)
-        self.search_service = (
-            self.root.databases["ASK_DOC"]
-            .schemas["PUBLIC"]
-            .cortex_search_services["doc_search_service"]
-        )
 
     def search(self, query, documentation_id):
-        """Search for relevant chunks using Cortex Search"""
         try:
-            # Convert documentation_id to string for Cortex Search
-            doc_id = str(documentation_id)
-            
-            filter_obj = {"@eq": {"documentation_id": doc_id}}
-            
-            results = self.search_service.search(
-                query=query,
-                columns=["content", "page_id", "documentation_id"],
-                filter=filter_obj,
-                limit=SEARCH_RESULT_LIMIT
+            search_service = (
+                self.root.databases['ASK_DOC']
+                .schemas['public']
+                .cortex_search_services['doc_search_service']
             )
-            return results
+            
+            filter_condition = {
+                "@eq": {
+                    "DOCUMENTATION_ID": str(documentation_id)
+                }
+            }
+            
+            columns = ['CONTENT', 'PAGE_ID', 'DOCUMENTATION_ID']
+            
+            search_results = search_service.search(
+                query,
+                columns=columns,
+                filter=filter_condition,
+                limit=5
+            )
+            
+            formatted_results = {
+                'results': [
+                    {
+                        'content': result['CONTENT'],
+                        'page_id': result['PAGE_ID'],
+                        'documentation_id': result['DOCUMENTATION_ID']
+                    }
+                    for result in search_results.results
+                ]
+            }
+            
+            return type('SearchResults', (), formatted_results)
+            
         except Exception as e:
             st.error(f"Search error: {str(e)}")
-            return None     
-        
+            return None
+
+
 class ChatBot:
     def __init__(self, api_key):
         self.client = Mistral(api_key=api_key)
